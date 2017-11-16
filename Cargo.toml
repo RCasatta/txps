@@ -1,0 +1,8 @@
+[package]
+name = "txps"
+version = "0.1.0"
+authors = ["Riccardo Casatta <riccardo@casatta.it>"]
+
+[dependencies]
+rocksdb = "0.8.1"
+rand = "0.3"
