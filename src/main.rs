@@ -37,25 +37,27 @@ fn main() {
     let start = Instant::now();
     for _ in 0..n {
         let r = random();
-        let mut data = Vec::from(&r[..key_length]);
+        let data = Vec::from(&r[..key_length]);
         vec.push(data);
     }
     elapsed("Init vector", start.elapsed());
 
 
     let db = DB::open_default(dir).unwrap();
-    let mut rng = rand::thread_rng();
     let start = Instant::now();
     let dummy = [0u8;4];
     for i in 0..n {
-        db.put(&vec[i],&dummy);
+        match db.put(&vec[i],&dummy) {
+            Ok(_) => (),
+            Err(e) => println!("operational problem encountered: {}", e),
+        }
     }
     elapsed("Random writes", start.elapsed());
 
     let start = Instant::now();
     for i in 0..n {
         match db.get(&vec[i]) {
-            Ok(Some(value)) => (),
+            Ok(Some(_)) => (),
             Ok(None) => println!("value not found"),
             Err(e) => println!("operational problem encountered: {}", e),
         }
