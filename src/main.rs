@@ -1,7 +1,10 @@
 extern crate rocksdb;
 extern crate rand;
 extern crate secp256k1;
+extern crate crypto;
 
+use crypto::sha2::Sha256;
+use crypto::digest::Digest;
 use std::env;
 use rocksdb::DB;
 use rand::Rng;
@@ -48,13 +51,13 @@ fn main() {
     let (sk,pk)=secp.generate_keypair(&mut rng).unwrap();
 
     let start = Instant::now();
-    let mut message_vec = Vec::new();
+    let mut bytes_vec = Vec::new();
     for i in 0..n {
         let mut bytes = [0u8;32];
         for j in 0..8 {
             bytes[j]=(i >> (j*8)) as u8;
         }
-        message_vec.push(Message::from_slice(&bytes).unwrap());
+        bytes_vec.push(bytes);
     }
     elapsed("init messages", start.elapsed(), n);
 
@@ -62,7 +65,7 @@ fn main() {
     let mut sign_vec = Vec::new();
     let sv_n = n / 20;
     for i in 0..sv_n {
-        let message=message_vec[i];
+        let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
         let signature = secp.sign(&message, &sk).unwrap();
         sign_vec.push(signature);
     }
@@ -70,7 +73,7 @@ fn main() {
 
     let start = Instant::now();
     for i in 0..sv_n {
-        let message = message_vec[i];
+        let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
         let signature = sign_vec[i];
         let r = secp.verify(&message, &signature, &pk);
         assert!(r.is_ok());
@@ -80,7 +83,7 @@ fn main() {
     let start = Instant::now();
     let mut sign_schnorr_vec = Vec::new();
     for i in 0..sv_n {
-        let message=message_vec[i];
+        let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
         let signature = secp.sign_schnorr(&message, &sk).unwrap();
         sign_schnorr_vec.push(signature);
     }
@@ -88,12 +91,16 @@ fn main() {
 
     let start = Instant::now();
     for i in 0..sv_n {
-        let message = message_vec[i];
+        let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
         let signature = sign_schnorr_vec[i];
         let r = secp.verify_schnorr(&message, &signature, &pk);
         assert!(r.is_ok());
     }
     elapsed("schnorr verify", start.elapsed(), sv_n);
+
+    let start = Instant::now();
+    merkle_root(bytes_vec.as_slice());
+    elapsed("merkle", start.elapsed(), n);
 
     let mut vec = Vec::new();
     let start = Instant::now();
@@ -179,4 +186,47 @@ fn transform_u64_to_array_of_u8(x:u64) -> [u8;8] {
     let b7 : u8 = ((x >> 8) & 0xff) as u8;
     let b8 : u8 = (x & 0xff) as u8;
     return [b1, b2, b3, b4, b5, b6, b7, b8]
+}
+
+/// Calculates merkle root for the whole block
+/// See: https://en.bitcoin.it/wiki/Protocol_documentation#Merkle_Trees
+pub fn merkle_root(hash_list: &[[u8; 32]]) -> [u8; 32] {
+    let n_hashes = hash_list.len();
+    if n_hashes == 1 {
+        return *hash_list.first().unwrap();
+    }
+
+    let double_sha256 = |a, b| sha256(&sha256(&merge_slices(a, b)));
+
+    // Calculates double sha hash for each pair. If len is odd, last value is ignored.
+    let mut hash_pairs = hash_list.chunks(2)
+        .filter(|c| c.len() == 2)
+        .map(|c| double_sha256(&c[0], &c[1]))
+        .collect::<Vec<[u8; 32]>>();
+
+    // If the length is odd, take the last hash twice
+    if n_hashes % 2 == 1 {
+        let last_hash = hash_list.last().unwrap();
+        hash_pairs.push(double_sha256(last_hash, last_hash));
+    }
+    return merkle_root(&mut hash_pairs);
+}
+
+
+#[inline]
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut hasher = Sha256::new();
+    hasher.input(data);
+    hasher.result(&mut out);
+    return out;
+}
+
+
+/// Simple slice merge
+#[inline]
+pub fn merge_slices(a: &[u8], b: &[u8]) -> Vec<u8> {
+    [a, b].iter()
+        .flat_map(|v| v.iter().cloned())
+        .collect::<Vec<u8>>()
 }

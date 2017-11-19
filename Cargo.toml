@@ -7,3 +7,4 @@ authors = ["Riccardo Casatta <riccardo@casatta.it>"]
 rocksdb = "0.8.1"
 rand = "0.3"
 secp256k1 = "0.7.1"
+rust-crypto     = "~0.2"
