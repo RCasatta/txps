@@ -1,15 +1,19 @@
 extern crate rocksdb;
 extern crate rand;
 extern crate secp256k1;
+extern crate blake2;
 extern crate crypto;
 
 use crypto::sha2::Sha256;
+use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
 use std::env;
 use rocksdb::DB;
 use rand::Rng;
 use std::time::{Instant , Duration};
 use secp256k1::{Secp256k1,Message};
+use std::collections::HashMap;
+use std::ops::BitXor;
 
 const  N: usize = 1_000_000;
 
@@ -44,24 +48,15 @@ fn main() {
         None => N,
     };
 
-    println!("DB: {} Working with {} elements", dir, n);
+    println!("Dir: {}\nWorking with {} elements", dir, n);
 
+
+    //ecdsa sign
+    let start = Instant::now();
     let secp = Secp256k1::new();
     let mut rng = rand::thread_rng();
     let (sk,pk)=secp.generate_keypair(&mut rng).unwrap();
-
-    let start = Instant::now();
-    let mut bytes_vec = Vec::new();
-    for i in 0..n {
-        let mut bytes = [0u8;32];
-        for j in 0..8 {
-            bytes[j]=(i >> (j*8)) as u8;
-        }
-        bytes_vec.push(bytes);
-    }
-    elapsed("init messages", start.elapsed(), n);
-
-    let start = Instant::now();
+    let bytes_vec=init_bytes_vec(n);
     let mut sign_vec = Vec::new();
     let sv_n = n / 20;
     for i in 0..sv_n {
@@ -71,6 +66,8 @@ fn main() {
     }
     elapsed("ecdsa sign", start.elapsed(), sv_n);
 
+
+    //ecdsa verify
     let start = Instant::now();
     for i in 0..sv_n {
         let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
@@ -80,6 +77,8 @@ fn main() {
     }
     elapsed("ecdsa verify", start.elapsed(), sv_n);
 
+
+    //schnorr sign
     let start = Instant::now();
     let mut sign_schnorr_vec = Vec::new();
     for i in 0..sv_n {
@@ -89,6 +88,7 @@ fn main() {
     }
     elapsed("schnorr sign", start.elapsed(), sv_n);
 
+    //schnorr verify
     let start = Instant::now();
     for i in 0..sv_n {
         let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
@@ -98,19 +98,25 @@ fn main() {
     }
     elapsed("schnorr verify", start.elapsed(), sv_n);
 
+
+    //merkle build
     let start = Instant::now();
-    merkle_root(bytes_vec.as_slice());
+    let mut merkle_proofs = HashMap::with_capacity(n*2);
+    let root = merkle_root(bytes_vec.as_slice(), &mut merkle_proofs);
+    for i in 0..sv_n {
+        let el = bytes_vec[i];
+        test_proof(&root, &el, &merkle_proofs);
+    }
     elapsed("merkle", start.elapsed(), n);
 
-    let mut vec = Vec::new();
+
+    //random writes on db
     let start = Instant::now();
+    let mut vec = Vec::new();
     for _ in 0..n {
         vec.push(Key::new().to_bytes());
     }
-    elapsed("Init vector", start.elapsed(), n);
-
     let db = DB::open_default(&dir).unwrap();
-    let start = Instant::now();
     let dummy = [0u8;16];
     for i in 0..n {
         match db.put(&vec[i],&dummy) {
@@ -120,6 +126,8 @@ fn main() {
     }
     elapsed("Random writes", start.elapsed(), n);
 
+
+    //random reads
     let start = Instant::now();
     for i in 0..n {
         match db.get(&vec[i]) {
@@ -131,11 +139,15 @@ fn main() {
     }
     elapsed("Random reads", start.elapsed(), n);
 
+
+    //sort
     let start = Instant::now();
     vec.sort();
     assert!(vec.windows(2).all(|w| w[0] <= w[1]));
     elapsed("Memory sort", start.elapsed(), n);
 
+
+    //ordered writes
     dir.push_str("2");
     let db = DB::open_default(dir).unwrap();
     let start = Instant::now();
@@ -148,6 +160,8 @@ fn main() {
     }
     elapsed("Ordered writes", start.elapsed(), n);
 
+
+    //ordered reads
     let start = Instant::now();
     for i in 0..n {
         match db.get(&vec[i]) {
@@ -159,6 +173,44 @@ fn main() {
     }
     elapsed("Ordered reads", start.elapsed(), n);
 
+
+    //sha256
+    let start = Instant::now();
+    for el in &bytes_vec {
+        sha256(&el[..]);
+    }
+    elapsed("sha256", start.elapsed(), n);
+
+
+    //blake2b
+    let start = Instant::now();
+    for el in &bytes_vec {
+        blake2b(&el[..]);
+    }
+    elapsed("blake2b", start.elapsed(), n);
+
+
+    //xor
+    let start = Instant::now();
+    let mut current = [1u8;32];
+    //for el in &bytes_vec {
+    for i in 0..n {
+        let el = bytes_vec[i];
+        current = bitxor( &current , &el);
+    }
+    elapsed("xor2", start.elapsed(), n);
+}
+
+fn init_bytes_vec(n : usize) -> Vec<[u8;32]>{
+    let mut bytes_vec = Vec::new();
+    for i in 0..n {
+        let mut bytes = [0u8; 32];
+        for j in 0..8 {
+            bytes[j] = (i >> (j * 8)) as u8;
+        }
+        bytes_vec.push(bytes);
+    }
+    bytes_vec
 }
 
 fn elapsed(title : &str, dur :Duration, n : usize ) {
@@ -188,9 +240,30 @@ fn transform_u64_to_array_of_u8(x:u64) -> [u8;8] {
     return [b1, b2, b3, b4, b5, b6, b7, b8]
 }
 
+
+pub fn test_proof(root: &[u8; 32], leaf: &[u8; 32], merkle_proofs : &HashMap<[u8; 32],Vec<u8>>) {
+
+    let mut current = [0u8;32];
+    current.clone_from_slice(&leaf[..]);
+    loop {
+        match merkle_proofs.get(&current) {
+            Some(value) => {
+                current = sha256(&sha256(value));
+            },
+            None => {
+                assert_eq!(root, &current);
+                break;
+            }
+        }
+    }
+
+
+
+}
+
 /// Calculates merkle root for the whole block
 /// See: https://en.bitcoin.it/wiki/Protocol_documentation#Merkle_Trees
-pub fn merkle_root(hash_list: &[[u8; 32]]) -> [u8; 32] {
+pub fn merkle_root(hash_list: &[[u8; 32]], merkle_proofs : &mut HashMap<[u8; 32],Vec<u8>>) -> [u8; 32] {
     let n_hashes = hash_list.len();
     if n_hashes == 1 {
         return *hash_list.first().unwrap();
@@ -209,7 +282,20 @@ pub fn merkle_root(hash_list: &[[u8; 32]]) -> [u8; 32] {
         let last_hash = hash_list.last().unwrap();
         hash_pairs.push(double_sha256(last_hash, last_hash));
     }
-    return merkle_root(&mut hash_pairs);
+
+    for i in 0..n_hashes {
+        let el = hash_list[i];
+        match i % 2 ==0 {
+            true =>
+                match hash_list.get(i+1) {
+                    Some(val) =>  merkle_proofs.insert(el,merge_slices(&hash_list[i], val)),
+                    None => merkle_proofs.insert(el,merge_slices(&hash_list[i], &hash_list[i])),
+                },
+            false => merkle_proofs.insert(el,merge_slices(&hash_list[i-1], &hash_list[i])),
+        };
+    }
+
+    return merkle_root(&mut hash_pairs, merkle_proofs);
 }
 
 
@@ -222,6 +308,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     return out;
 }
 
+#[inline]
+pub fn blake2b(data: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut hasher = Blake2b::new(32);
+    hasher.input(data);
+    hasher.result(&mut out);
+    return out;
+}
 
 /// Simple slice merge
 #[inline]
@@ -229,4 +323,12 @@ pub fn merge_slices(a: &[u8], b: &[u8]) -> Vec<u8> {
     [a, b].iter()
         .flat_map(|v| v.iter().cloned())
         .collect::<Vec<u8>>()
+}
+
+fn bitxor( a : &[u8;32], b : &[u8;32]) -> [u8;32] {
+    let mut result = [0u8;32];
+    for i in 0..32 {
+        result[i] = a[i] ^ b[i]
+    }
+    result
 }
