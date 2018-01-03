@@ -7,13 +7,14 @@ extern crate crypto;
 use crypto::sha2::Sha256;
 use crypto::blake2b::Blake2b;
 use crypto::digest::Digest;
+use crypto::ed25519;
 use std::env;
-use rocksdb::DB;
+use rocksdb::{DB, WriteBatch};
 use rand::Rng;
 use std::time::{Instant , Duration};
-use secp256k1::{Secp256k1,Message};
+use secp256k1::{Secp256k1,Message,Signature};
 use std::collections::HashMap;
-use std::ops::BitXor;
+
 
 const  N: usize = 1_000_000;
 
@@ -51,6 +52,7 @@ fn main() {
     println!("Dir: {}\nWorking with {} elements", dir, n);
 
 
+
     //ecdsa sign
     let start = Instant::now();
     let secp = Secp256k1::new();
@@ -61,7 +63,7 @@ fn main() {
     let sv_n = n / 20;
     for i in 0..sv_n {
         let message=Message::from_slice(&bytes_vec[i]).unwrap() ;
-        let signature = secp.sign(&message, &sk).unwrap();
+        let signature : Signature = secp.sign(&message, &sk).unwrap();
         sign_vec.push(signature);
     }
     elapsed("ecdsa sign", start.elapsed(), sv_n);
@@ -76,7 +78,6 @@ fn main() {
         assert!(r.is_ok());
     }
     elapsed("ecdsa verify", start.elapsed(), sv_n);
-
 
     //schnorr sign
     let start = Instant::now();
@@ -98,6 +99,25 @@ fn main() {
     }
     elapsed("schnorr verify", start.elapsed(), sv_n);
 
+    let start = Instant::now();
+    let mut seed = [0u8;64];
+    rng.fill_bytes(&mut seed);
+    let mut sign_ed25519_vec = Vec::new();
+    let (edsk,edpk) = ed25519::keypair(&seed[..]);
+    for i in 0..sv_n {
+        let signature = ed25519::signature(&bytes_vec[i], &edsk);
+        sign_ed25519_vec.push(signature);
+    }
+    elapsed("ed25519 sign", start.elapsed(), sv_n);
+
+    let start = Instant::now();
+    for i in 0..sv_n {
+        let b = ed25519::verify(&bytes_vec[i], &edpk, &sign_ed25519_vec[i]);
+        //println!("{}",b);
+        //assert!(b);
+    }
+    elapsed("ed25519 verify", start.elapsed(), sv_n);
+
 
     //merkle build
     let start = Instant::now();
@@ -117,6 +137,7 @@ fn main() {
         vec.push(Key::new().to_bytes());
     }
     let db = DB::open_default(&dir).unwrap();
+
     let dummy = [0u8;16];
     for i in 0..n {
         match db.put(&vec[i],&dummy) {
@@ -138,6 +159,23 @@ fn main() {
 
     }
     elapsed("Random reads", start.elapsed(), n);
+
+    //batched writes on db
+    let start = Instant::now();
+    let mut vec = Vec::new();
+    for _ in 0..n {
+        vec.push(Key::new().to_bytes());
+    }
+    dir.push_str("1");
+    let mut batch = WriteBatch::default();
+    let db = DB::open_default(&dir).unwrap();
+
+    let dummy = [0u8;16];
+    for i in 0..n {
+        batch.put(&vec[i],&dummy).expect("operational problem encountered");
+    }
+    db.write(batch).expect("error writing batch writes");
+    elapsed("Batched writes", start.elapsed(), n);
 
 
     //sort
@@ -198,7 +236,7 @@ fn main() {
         let el = bytes_vec[i];
         current = bitxor( &current , &el);
     }
-    elapsed("xor2", start.elapsed(), n);
+    elapsed("xor", start.elapsed(), n);
 }
 
 fn init_bytes_vec(n : usize) -> Vec<[u8;32]>{
